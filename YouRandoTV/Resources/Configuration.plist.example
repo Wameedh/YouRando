@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>YoutubeApiKey</key>
+    <string>YOUR_YOUTUBE_API_KEY</string>
+    <key>GoogleClientId</key>
+    <string>YOUR_GOOGLE_CLIENT_ID</string>
+    <key>GoogleClientSecret</key>
+    <string>YOUR_GOOGLE_CLIENT_SECRET</string>
+    <key>RedirectUri</key>
+    <string>com.yourando.tv:/oauth2callback</string>
+</dict>
+</plist> 
