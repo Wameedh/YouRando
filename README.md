@@ -59,4 +59,93 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+# YouRandoTV
+
+YouRandoTV is a native tvOS application that brings the YouTube recommendation randomizer experience to your television. Discover new content outside your usual recommendation bubble and enjoy a more diverse YouTube experience on the big screen.
+
+## Features
+
+- Native tvOS interface optimized for the Apple TV remote
+- OAuth authentication with Google/YouTube
+- Intelligent recommendation algorithm that avoids content from channels you already subscribe to
+- Diverse content discovery from multiple categories
+- User preference settings to fine-tune recommendations
+- Picture-in-picture video playback
+- Voice search integration with Siri
+
+## Technology Stack
+
+- Swift and SwiftUI for the frontend
+- Combine framework for reactive programming
+- YouTube Data API v3 integration
+- Keychain for secure credential storage
+- AVKit for video playback
+
+## Requirements
+
+- Xcode 14.0 or later
+- tvOS 16.0 or later
+- Apple Developer account (for deploying to real devices)
+- YouTube API key and OAuth credentials
+
+## Installation
+
+1. Clone the repository:
+   ```
+   git clone https://github.com/Wameedh/YouRandoTV.git
+   cd YouRandoTV
+   ```
+
+2. Create a new Xcode project:
+   ```
+   File > New > Project > tvOS > App
+   ```
+   
+3. Import the files from this repository into your Xcode project, maintaining the directory structure.
+
+4. Configure the YouTube API Keys:
+   - Copy `Resources/Configuration.plist.example` to `Resources/Configuration.plist`
+   - Add your YouTube API key and OAuth credentials to the Configuration.plist file
+   - Alternatively, use environment variables in the Xcode scheme
+
+5. Build and run the app on the Apple TV simulator or a real device
+
+## Project Structure
+
+- `App/` - SwiftUI application and scenes
+- `Views/` - SwiftUI views
+- `Models/` - Data models
+- `Services/` - API services and networking
+- `Helpers/` - Utility functions and extensions
+- `Resources/` - Assets and configuration files
+
+## Development Guidelines
+
+### Code Style
+
+- Follow Swift API Design Guidelines
+- Use SwiftUI for all user interfaces
+- Implement MVVM architecture
+- Write unit tests for all business logic
+
+### Best Practices
+
+- Implement proper error handling
+- Use Combine for asynchronous operations
+- Follow Apple Human Interface Guidelines for tvOS
+- Use focused navigation for optimal remote control experience
+- Implement caching for improved performance
+
+## Related Project
+
+For the web version of this application, check out [YouRandoWeb](https://github.com/Wameedh/YouRandoWeb).
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
 This project is licensed under the MIT License - see the LICENSE file for details. 
