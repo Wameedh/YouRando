@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouRando - Discover New Content</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>YouRando</h1>
+      <p class="tagline">Discover videos beyond your bubble</p>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-content">
+          <h2>Break Out of Your Algorithm</h2>
+          <p>YouRando intelligently recommends videos from channels you don't follow, in genres you haven't explored. Expand your horizons and discover content outside your usual interests.</p>
+          
+          <% if (user) { %>
+            <a href="/dashboard" class="btn primary">Go to Dashboard</a>
+            <a href="/logout" class="btn secondary">Logout</a>
+          <% } else { %>
+            <a href="/auth/google" class="btn primary">
+              <svg viewBox="0 0 24 24" width="24" height="24" xmlns="http://www.w3.org/2000/svg">
+                <g transform="matrix(1, 0, 0, 1, 0, 0)">
+                  <path d="M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12C5,7.9 8.2,4.73 12.2,4.73C15.29,4.73 17.1,6.7 17.1,6.7L19,4.72C19,4.72 16.56,2 12.1,2C6.42,2 2.03,6.8 2.03,12C2.03,17.05 6.16,22 12.25,22C17.6,22 21.5,18.33 21.5,12.91C21.5,11.76 21.35,11.1 21.35,11.1V11.1Z" fill="currentColor"></path>
+                </g>
+              </svg>
+              Sign in with Google
+            </a>
+            <p class="auth-note">For the best experience, you can optionally share your watch history during the sign-in process.</p>
+          <% } %>
+        </div>
+        <div class="hero-image">
+          <img src="/images/discovery.svg" alt="Content Discovery Illustration">
+        </div>
+      </section>
+
+      <section class="features">
+        <div class="feature-card">
+          <div class="icon">🎯</div>
+          <h3>Intelligent Recommendations</h3>
+          <p>Get personalized content suggestions based on what you haven't seen</p>
+        </div>
+        <div class="feature-card">
+          <div class="icon">🧭</div>
+          <h3>New Genres</h3>
+          <p>Explore content categories you've never watched before</p>
+        </div>
+        <div class="feature-card">
+          <div class="icon">👥</div>
+          <h3>New Creators</h3>
+          <p>Discover channels you don't already subscribe to</p>
+        </div>
+        <div class="feature-card">
+          <div class="icon">🔐</div>
+          <h3>Privacy Options</h3>
+          <p>Choose whether to share your watch history for better recommendations</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>&copy; <%= new Date().getFullYear() %> YouRando. Powered by YouTube Intelligent Discovery.</p>
+    </footer>
+  </div>
+</body>
+</html> 
