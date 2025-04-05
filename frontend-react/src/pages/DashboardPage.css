@@ -1,0 +1,43 @@
+.dashboard-page {
+  padding: 20px;
+  max-width: 1400px; /* Limit max width */
+  margin: 0 auto; /* Center the content */
+}
+
+.dashboard-page h2 {
+  margin-bottom: 20px;
+  color: #333;
+}
+
+.refresh-button {
+  margin-bottom: 25px;
+}
+
+.error-message {
+  color: #d9534f; /* Bootstrap danger color */
+  background-color: #f2dede;
+  border: 1px solid #ebccd1;
+  padding: 15px;
+  border-radius: 4px;
+  margin-bottom: 20px;
+}
+
+.no-results-message {
+  color: #555;
+  font-style: italic;
+  margin-top: 30px;
+}
+
+.recommendations-grid {
+  display: grid;
+  /* Responsive grid: Adjust columns based on available width */
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); 
+  gap: 20px; /* Space between grid items */
+  margin-top: 20px;
+}
+
+/* Ensure grid items align nicely if last row isn't full */
+.recommendations-grid::after {
+  content: "";
+  flex: auto; /* Fills remaining space */
+} 

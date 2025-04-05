@@ -1,0 +1,78 @@
+.app-header {
+  background-color: #282c34;
+  padding: 10px 30px; /* Slightly reduced padding */
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.header-logo {
+   text-decoration: none; /* Remove underline from logo link */
+   color: white; 
+}
+
+.header-title {
+  font-size: 1.6rem; /* Slightly smaller */
+  font-weight: bold;
+  margin: 0;
+}
+
+.header-nav {
+  flex-grow: 1; /* Allow nav to take up space */
+  text-align: center; /* Center nav links */
+}
+
+.nav-link {
+  color: #adb5bd; /* Lighter gray for inactive links */
+  margin: 0 18px;
+  font-size: 1.1rem;
+  text-decoration: none;
+  padding: 8px 0;
+  transition: color 0.2s ease;
+}
+
+.nav-link:hover {
+  color: #dee2e6; /* Slightly lighter on hover */
+}
+
+.nav-link.active {
+  color: white;
+  font-weight: 500;
+  border-bottom: 2px solid #61dafb; /* Active indicator */
+}
+
+.header-user {
+  display: flex;
+  align-items: center;
+}
+
+.user-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  margin-right: 10px;
+  border: 1px solid #444; /* Subtle border */
+}
+
+.user-name {
+   margin-right: 15px;
+   color: #e9ecef;
+   font-weight: 500;
+}
+
+.logout-button {
+  background-color: #dc3545; /* Red for logout */
+  color: white;
+  border: none;
+  padding: 6px 12px; /* Smaller button */
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background-color 0.2s ease;
+}
+
+.logout-button:hover {
+  background-color: #c82333;
+} 

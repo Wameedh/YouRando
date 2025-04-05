@@ -121,54 +121,23 @@ passport.use(
   )
 );
 
-// Enhanced Google OAuth 2.0 Strategy with watch history access
-passport.use(
-  "google-with-history",
-  new GoogleStrategy(
-    {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: process.env.REDIRECT_URL_WITH_HISTORY,
-      scope: SCOPES.WITH_HISTORY,
-      passReqToCallback: true,
-    },
-    (req, accessToken, refreshToken, profile, done) => {
-      // We'll no longer use this strategy for history access since it requires Google Takeout
-      // Instead, inform the user they need to use Takeout
-
-      // Create new user object with standard access
-      const user = {
-        id: profile.id,
-        email: profile.emails[0].value,
-        name: profile.displayName,
-        accessToken,
-        refreshToken,
-        hasHistoryAccess: false, // Don't set history access flag here
-      };
-
-      // If user exists, preserve their settings
-      if (req.user && req.user.settings) {
-        user.settings = req.user.settings;
-
-        // Preserve history access if they previously uploaded via Takeout
-        if (req.user.hasHistoryAccess) {
-          user.hasHistoryAccess = true;
-          user.watchHistory = req.user.watchHistory || [];
-        }
-      }
-
-      console.log("User authenticated:", user);
-      return done(null, user);
-    }
-  )
-);
-
-// Middleware to check if user is authenticated
-const isAuthenticated = (req, res, next) => {
-  if (req.isAuthenticated()) {
+// Middleware to check if user is authenticated for API routes
+const isAuthenticatedAPI = (req, res, next) => {
+  if (req.isAuthenticated() && req.user) {
     return next();
   }
-  res.redirect("/");
+  res.status(401).json({ message: "Unauthorized: Please log in." });
+};
+
+// Middleware to check if user is authenticated for VIEW routes (redirects)
+const isAuthenticated = (req, res, next) => {
+  if (req.isAuthenticated() && req.user) {
+    return next();
+  }
+  // Redirect to the frontend login page if not authenticated
+  res.redirect(
+    process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL}/login` : "/login"
+  );
 };
 
 // Routes
@@ -182,30 +151,6 @@ app.get(
   passport.authenticate("google", {
     scope: SCOPES.BASIC,
   })
-);
-
-// Authentication with history access (now redirects to Google Takeout instructions)
-app.get("/auth/google/with-history", (req, res) => {
-  // Instead of requesting the invalid scope, redirect to dashboard with a flag to show Takeout instructions
-  if (req.isAuthenticated()) {
-    req.session.showTakeoutInstructions = true;
-    res.redirect("/dashboard");
-  } else {
-    // If not authenticated, first authenticate with standard permissions
-    res.redirect("/auth/google");
-  }
-});
-
-// Add a callback handler for the history-enabled auth
-app.get(
-  "/auth/google/callback/with-history",
-  passport.authenticate("google", { failureRedirect: "/" }),
-  (req, res) => {
-    // This is now just a backup/legacy route
-    // Set a flag to show the takeout instructions
-    req.session.showTakeoutInstructions = true;
-    res.redirect("/dashboard");
-  }
 );
 
 // Standard authentication callback
@@ -225,12 +170,32 @@ app.get(
   }
 );
 
-app.get("/logout", (req, res) => {
-  req.logout(function (err) {
+app.post("/auth/logout", (req, res, next) => {
+  // Changed to POST as it modifies state
+  req.logout((err) => {
     if (err) {
-      return next(err);
+      console.error("Logout error:", err);
+      return res.status(500).json({ message: "Logout failed." });
     }
-    res.redirect("/");
+    req.session.destroy((destroyErr) => {
+      if (destroyErr) {
+        console.error("Session destruction error:", destroyErr);
+        // Still proceed with clearing cookie and sending success
+      }
+      res.clearCookie("connect.sid"); // Ensure session cookie is cleared
+      res.status(200).json({ message: "Logged out successfully." });
+    });
+  });
+});
+
+// API endpoint to check user authentication status
+app.get("/api/user/status", isAuthenticatedAPI, (req, res) => {
+  // isAuthenticatedAPI already ensures req.user exists
+  res.json({
+    isAuthenticated: true,
+    user: req.user.profile, // Send profile info
+    settings: req.user.settings, // Send current settings
+    lastHistoryUpload: req.user.lastHistoryUpload,
   });
 });
 
@@ -292,195 +257,192 @@ app.get("/settings", isAuthenticated, (req, res) => {
 // Add middleware to parse JSON request bodies
 app.use(express.json());
 
-// Add middleware for file uploads
+// ** Takeout Upload API **
+
+// Configure Multer for storing uploads
+const uploadDir = path.join(__dirname, "uploads");
+fs.mkdirSync(uploadDir, { recursive: true }); // Ensure directory exists on startup
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    // Use a unique filename: userId-timestamp-originalName
+    const userId = req.user?.id || "unknownUser"; // Use user ID if available
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(
+      null,
+      `${userId}-${uniqueSuffix}-${file.originalname.replace(
+        /[^a-zA-Z0-9.]/g,
+        "_"
+      )}`
+    ); // Sanitize filename
+  },
+});
+
 const upload = multer({
-  dest: path.join(__dirname, "../uploads/"),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  storage: storage,
+  limits: { fileSize: 30 * 1024 * 1024 }, // Increased limit to 30MB for larger history files
+  fileFilter: function (req, file, cb) {
+    // Accept only JSON files
+    if (
+      !file.mimetype === "application/json" &&
+      !file.originalname.toLowerCase().endsWith(".json")
+    ) {
+      console.log(
+        `Rejected file upload: ${file.originalname}, mimetype: ${file.mimetype}`
+      );
+      // Pass an error to be caught by the error handling middleware
+      return cb(
+        new Error("Invalid file type: Only .json files are allowed."),
+        false
+      );
+    }
+    cb(null, true);
+  },
 });
 
-// API route for user settings
-app.post("/api/settings", isAuthenticated, (req, res) => {
-  const { discoveryLevel, excludedCategories } = req.body;
-  // Validate input
-  if (discoveryLevel && typeof discoveryLevel === "string") {
-    req.user.settings.discoveryLevel = discoveryLevel;
-  }
-  if (Array.isArray(excludedCategories)) {
-    req.user.settings.excludedCategories = excludedCategories;
-  }
-  // In a real app, save these settings persistently (DB)
-  console.log(
-    `Settings updated for ${req.user.profile?.email}:`,
-    req.user.settings
-  );
-  res.json({ success: true, settings: req.user.settings });
-});
-
-// API route to delete user data
-app.delete("/api/user/data", isAuthenticated, (req, res) => {
-  try {
-    // In a real app, you would delete user data from a database
-    // For now, we'll just clear the settings from the session
-    req.user.settings = {};
-
-    res.json({ success: true, message: "User data deleted successfully" });
-  } catch (error) {
-    console.error("Error deleting user data:", error);
-    res
-      .status(500)
-      .json({ success: false, error: "Failed to delete user data" });
-  }
-});
-
-// API route to check the user's access status
-app.get("/api/user/access-status", isAuthenticated, async (req, res) => {
-  try {
-    // Check if token is still valid
-    const tokenInfo = await verifyToken(req.user.accessToken);
-
-    // Return user's current access status
-    res.json({
-      success: true,
-      hasHistoryAccess: req.user.hasHistoryAccess || false,
-      tokenValid: !!tokenInfo,
-      scopes: tokenInfo ? tokenInfo.scope.split(" ") : [],
-      tokenExpiresIn: tokenInfo ? tokenInfo.expires_in : 0,
+// Middleware to handle Multer errors specifically
+function handleUploadErrors(fieldName) {
+  return function (req, res, next) {
+    upload.single(fieldName)(req, res, function (err) {
+      if (err instanceof multer.MulterError) {
+        // A Multer error occurred (e.g., file too large).
+        console.error("Multer Error:", err);
+        let message = `File upload error: ${err.message}.`;
+        if (err.code === "LIMIT_FILE_SIZE") {
+          message = `File too large. Maximum size is ${
+            upload.limits.fileSize / 1024 / 1024
+          }MB.`;
+        }
+        return res.status(400).json({ success: false, message });
+      } else if (err) {
+        // An error from the fileFilter or other unknown upload error.
+        console.error("Unknown Upload Error:", err);
+        return res.status(400).json({
+          success: false,
+          message:
+            err.message || "An unknown error occurred during file upload.",
+        });
+      }
+      // Everything went fine.
+      next();
     });
-  } catch (error) {
-    console.error("Error checking access status:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to check access status",
-      details: error.message,
-    });
-  }
-});
+  };
+}
 
-// API route to handle watch history file upload
 app.post(
   "/api/user/watch-history/upload",
-  isAuthenticated,
-  upload.single("history-file"),
+  isAuthenticatedAPI,
+  handleUploadErrors("historyFile"), // Use the Multer error handler middleware
   async (req, res) => {
+    if (!req.file) {
+      // This case should ideally be caught by handleUploadErrors if no file is sent,
+      // but added as a safeguard.
+      return res
+        .status(400)
+        .json({ success: false, message: "No history file uploaded." });
+    }
+
+    const watchHistoryPath = req.file.path;
+    let processedCount = 0;
+    let processedVideoIds = []; // Store IDs to potentially save to DB
+
     try {
-      // Check if file was uploaded
-      if (!req.file) {
-        return res
-          .status(400)
-          .json({ success: false, error: "No file uploaded" });
-      }
-
-      // Read the uploaded JSON file
-      const watchHistoryPath = req.file.path;
-
-      // Parse the JSON content
+      console.log(
+        `Processing uploaded file: ${watchHistoryPath} (Size: ${req.file.size} bytes)`
+      );
       const watchHistoryData = JSON.parse(
         fs.readFileSync(watchHistoryPath, "utf8")
       );
 
-      // Extract video IDs from the Google Takeout watch history
-      const watchedVideos = extractVideoIdsFromTakeout(watchHistoryData);
-
+      // Extract only unique video IDs
+      processedVideoIds = extractVideoIdsFromTakeout(watchHistoryData);
+      processedCount = processedVideoIds.length;
       console.log(
-        `Processed ${watchedVideos.length} videos from watch history`
+        `Extracted ${processedCount} unique video IDs from watch history file.`
       );
 
-      // Store the watch history in the user's session
-      req.user.watchHistory = watchedVideos;
-      req.user.hasHistoryAccess = true;
-      req.user.lastHistoryUpload = new Date().toISOString();
+      if (processedCount === 0) {
+        // Don't treat empty history as an error, but inform the user
+        // Keep existing history flags if they exist
+        return res.json({
+          success: true,
+          processedVideos: 0,
+          lastUpdate: req.user.lastHistoryUpload || null,
+          message: "Processed history file, but no watch events found.",
+        });
+      }
 
-      // Clean up - delete the uploaded file
-      fs.unlinkSync(watchHistoryPath);
+      // ** CRITICAL TODO: Persist History **
+      // 1. Fetch existing history IDs for user `req.user.id` from DB.
+      // 2. Merge `processedVideoIds` with existing IDs (handle potential duplicates).
+      // 3. Save the updated list back to the DB.
+      // 4. Update `hasHistoryAccess = true` and `lastHistoryUpload = new Date()` in the user's DB record.
+      console.warn(
+        "Watch history processed but NOT saved persistently. Implement database storage!"
+      );
 
-      res.json({
-        success: true,
-        processedVideos: watchedVideos.length,
-        lastUpdate: req.user.lastHistoryUpload,
-        message: "Watch history processed successfully",
+      // Temporarily update session flags (remove once DB is implemented)
+      req.session.regenerate((err) => {
+        // Regenerate session to save changes immediately
+        if (err) {
+          return next(err);
+        }
+        req.user.hasHistoryAccess = true;
+        req.user.lastHistoryUpload = new Date().toISOString();
+        req.session.save((err) => {
+          // Explicitly save session
+          if (err) {
+            return next(err);
+          }
+          res.json({
+            success: true,
+            processedVideos: processedCount,
+            lastUpdate: req.user.lastHistoryUpload,
+            message:
+              "Watch history processed. NOTE: Data persistence not yet implemented.",
+          });
+        });
       });
     } catch (error) {
-      console.error("Error processing watch history:", error);
+      console.error("Error processing watch history upload:", error);
+      let message = "Failed to process watch history file.";
+      if (error instanceof SyntaxError) {
+        message =
+          "Invalid JSON file format. Please ensure you uploaded the correct file from Google Takeout.";
+      }
       res.status(500).json({
         success: false,
-        error: error.message || "Failed to process watch history file",
+        message: message,
+        error: error.message, // Provide error message for debugging
+      });
+    } finally {
+      // Clean up the uploaded file asynchronously
+      fs.unlink(watchHistoryPath, (err) => {
+        if (err)
+          console.error(
+            `Error deleting uploaded history file ${watchHistoryPath}:`,
+            err
+          );
+        else console.log(`Cleaned up uploaded file: ${watchHistoryPath}`);
       });
     }
   }
 );
 
-// Helper function to extract video IDs from Google Takeout JSON
-function extractVideoIdsFromTakeout(watchHistoryData) {
-  // Ensure the data is in the expected format
-  if (!Array.isArray(watchHistoryData)) {
-    console.error("Watch history data is not an array");
-    return [];
-  }
-
-  const videoIds = [];
-
-  // Process each entry in the watch history
-  watchHistoryData.forEach((entry) => {
-    try {
-      // Check if this is a watched video entry
-      if (entry.titleUrl && entry.titleUrl.includes("youtube.com/watch")) {
-        // Extract the video ID from the URL
-        const urlObj = new URL(entry.titleUrl);
-        const videoId = urlObj.searchParams.get("v");
-
-        if (videoId) {
-          videoIds.push({
-            videoId,
-            title: entry.title || "Unknown Title",
-            time: entry.time || null,
-            channelId: null, // Not directly available in Takeout
-            channelTitle:
-              entry.subtitles && entry.subtitles[0]
-                ? entry.subtitles[0].name
-                : "Unknown Channel",
-          });
-        }
-      }
-    } catch (err) {
-      console.error("Error processing watch history entry:", err);
-      // Continue processing other entries
-    }
-  });
-
-  return videoIds;
-}
-
-// Create a helper function to create properly authenticated YouTube clients
+// Helper function to create an authenticated YouTube API client
 function createYoutubeClient(accessToken) {
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
+    // Note: The redirect URL isn't strictly needed here as we're just setting credentials,
+    // but it's good practice if you might use it for refresh tokens later.
+    // process.env.REDIRECT_URL || '/auth/google/callback'
   );
-
-  oauth2Client.setCredentials({
-    access_token: accessToken,
-  });
-
-  return google.youtube({
-    version: "v3",
-    auth: oauth2Client,
-  });
-}
-
-// Helper function to verify token validity
-async function verifyToken(accessToken) {
-  try {
-    const response = await axios.get(
-      "https://www.googleapis.com/oauth2/v1/tokeninfo",
-      {
-        params: { access_token: accessToken },
-      }
-    );
-    return response.data;
-  } catch (error) {
-    console.error("Token verification failed:", error.message);
-    return null;
-  }
+  oauth2Client.setCredentials({ access_token: accessToken });
+  return google.youtube({ version: "v3", auth: oauth2Client });
 }
 
 // API route to export user data
@@ -568,44 +530,48 @@ app.get("/api/recommendations", isAuthenticated, async (req, res) => {
 
 // Helper function to get user subscriptions
 async function getUserSubscriptions(youtube) {
-  try {
-    // The youtube object is already authenticated with the user's access token
-    // Get all subscriptions using pagination if needed
-    let allSubscriptions = [];
-    let nextPageToken = null;
+  let subscriptions = [];
+  let nextPageToken = null;
+  const maxPages = 10; // Limit pages to avoid excessive API usage/quota issues
+  let pageCount = 0;
 
+  console.log("Fetching user subscriptions...");
+
+  try {
     do {
-      console.log(
-        `Fetching subscriptions page ${nextPageToken ? "with token" : "1"}`
-      );
+      pageCount++;
       const response = await youtube.subscriptions.list({
         part: "snippet",
         mine: true,
         maxResults: 50,
-        pageToken: nextPageToken || undefined,
+        pageToken: nextPageToken,
       });
 
-      if (response.data.items && response.data.items.length > 0) {
-        const pageSubscriptions = response.data.items.map((item) => ({
-          channelId: item.snippet.resourceId.channelId,
-          channelTitle: item.snippet.title,
-        }));
-
-        allSubscriptions = allSubscriptions.concat(pageSubscriptions);
-        console.log(
-          `Got ${pageSubscriptions.length} subscriptions from this page`
-        );
+      if (response.data.items) {
+        // Add only necessary info
+        const pageSubs = response.data.items
+          .map((sub) => ({
+            channelId: sub.snippet?.resourceId?.channelId,
+            title: sub.snippet?.title,
+          }))
+          .filter((s) => s.channelId && s.title); // Filter out invalid items
+        subscriptions = subscriptions.concat(pageSubs);
       }
-
       nextPageToken = response.data.nextPageToken;
-    } while (nextPageToken);
+    } while (nextPageToken && pageCount < maxPages);
 
-    console.log(`Retrieved ${allSubscriptions.length} total subscriptions`);
-    return allSubscriptions;
+    console.log(`Fetched ${subscriptions.length} subscriptions.`);
+    return subscriptions;
   } catch (error) {
-    console.error("Error fetching subscriptions:", error);
-    // Don't fail completely, just return an empty array
-    return [];
+    console.error(
+      "Error fetching subscriptions:",
+      error.response?.data?.error || error.message
+    );
+    // Re-throw authentication errors to be handled by the route
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      throw new Error("Invalid Credentials");
+    }
+    return []; // Return empty on other errors
   }
 }
 
@@ -980,761 +946,344 @@ async function getUserWatchHistory(youtube) {
   }
 }
 
-// Main function for intelligent recommendations
+// Main recommendation logic
 async function getIntelligentRecommendations(
-  youtube,
-  subscriptions,
-  watchHistory = []
+  youtube, // Authenticated client
+  subscriptions, // Array from getUserSubscriptions
+  watchedVideoIds = [] // Array of video IDs (strings)
 ) {
+  console.log("Starting intelligent recommendation generation...");
+  const subscribedChannelIds = new Set(
+    subscriptions.map((sub) => sub.channelId)
+  );
+  const watchedSet = new Set(watchedVideoIds);
+
+  let recommendations = [];
+  const maxRecommendations = 50;
+  const searchAttempts = 5; // Limit API calls per request
+  let attempts = 0;
+
+  const discoveryTerms = getDiscoveryTerms(); // Get diverse terms
+  const usedTerms = new Set();
+
   try {
-    // 1. Extract channel IDs to exclude
-    const subscribedChannelIds = subscriptions.map((sub) => sub.channelId);
-
-    // 2. Extract video IDs to exclude
-    const watchedVideoIds = watchHistory
-      .map((video) => {
-        // Handle both API response format and Takeout format
-        return (
-          video.videoId ||
-          (video.titleUrl
-            ? new URL(video.titleUrl).searchParams.get("v")
-            : null)
-        );
-      })
-      .filter((id) => id !== null);
-
-    console.log(
-      `Excluding ${watchedVideoIds.length} watched videos from recommendations`
-    );
-
-    // 3. Generate discovery terms based on diverse categories
-    const discoveryTerms = getDiscoveryTerms();
-
-    // 4. Get a diverse set of categories to search for
-    const allCategories = [
-      ...new Set(discoveryTerms.map((item) => item.category)),
-    ];
-
-    // Shuffle the categories to get random order
-    const shuffledCategories = allCategories.sort(() => Math.random() - 0.5);
-
-    // Take 3-5 categories for diversity
-    const selectedCategories = shuffledCategories.slice(
-      0,
-      Math.floor(Math.random() * 3) + 3
-    );
-    console.log(
-      `Selected categories for diversity: ${selectedCategories.join(", ")}`
-    );
-
-    // 5. Collect videos from multiple categories
-    let allSearchResults = [];
-    const usedTerms = [];
-
-    // For each category, get a random term and fetch videos
-    for (const category of selectedCategories) {
-      try {
-        // Get terms for this category
-        const categoryTerms = discoveryTerms.filter(
-          (item) => item.category === category
-        );
-
-        if (categoryTerms.length === 0) {
-          console.log(`No terms found for category: ${category}`);
-          continue;
-        }
-
-        // Select a random term from this category
-        const randomTerm =
-          categoryTerms[Math.floor(Math.random() * categoryTerms.length)];
-
-        if (!randomTerm || !randomTerm.term) {
-          console.log(`Invalid term for category ${category}:`, randomTerm);
-          continue;
-        }
-
-        usedTerms.push(randomTerm.term);
-
-        console.log(
-          `Searching for category '${category}' with term: ${randomTerm.term}`
-        );
-
-        // Search for videos with this term
-        const results = await searchYouTubeVideos(youtube, randomTerm.term);
-
-        if (results && results.length > 0) {
-          // Tag the videos with their category
-          const taggedResults = results.map((video) => ({
-            ...video,
-            discoveryCategory: category,
-            discoveryTerm: randomTerm.term,
-          }));
-
-          allSearchResults = allSearchResults.concat(taggedResults);
-          console.log(
-            `Found ${results.length} videos for category '${category}'`
-          );
-        } else {
-          console.log(
-            `No results found for category '${category}' with term '${randomTerm.term}'`
-          );
-        }
-      } catch (categoryError) {
-        console.error(`Error processing category ${category}:`, categoryError);
-        // Continue with the next category
+    // Attempt 1: Search based on diverse terms using the user's token
+    while (
+      recommendations.length < maxRecommendations &&
+      attempts < searchAttempts
+    ) {
+      attempts++;
+      // Get a term not used yet
+      let randomTermObj =
+        discoveryTerms[Math.floor(Math.random() * discoveryTerms.length)];
+      let termFetchAttempt = 0;
+      while (
+        usedTerms.has(randomTermObj.term) &&
+        termFetchAttempt < discoveryTerms.length
+      ) {
+        randomTermObj =
+          discoveryTerms[Math.floor(Math.random() * discoveryTerms.length)];
+        termFetchAttempt++;
       }
-    }
+      if (usedTerms.has(randomTermObj.term)) {
+        console.log("Ran out of unique discovery terms for this request.");
+        break; // Avoid infinite loop if all terms used quickly
+      }
 
-    // If we have very few results, try a generic term
-    if (allSearchResults.length < 10) {
+      const searchTerm = randomTermObj.term;
+      usedTerms.add(searchTerm);
       console.log(
-        "Not enough results from category search. Adding generic results."
+        `Recommendation attempt ${attempts}, searching (user auth) for: "${searchTerm}"`
       );
-      const genericResults = await searchYouTubeVideos(
-        youtube,
-        "interesting videos"
-      );
-      if (genericResults && genericResults.length > 0) {
-        const taggedGeneric = genericResults.map((video) => ({
-          ...video,
-          discoveryCategory: "general",
-          discoveryTerm: "interesting videos",
-        }));
 
-        allSearchResults = allSearchResults.concat(taggedGeneric);
-      }
+      // Use the authenticated client for searching
+      const searchResults = await searchYouTubeVideos(youtube, searchTerm, 20);
+
+      const uniqueNewVideos = searchResults.filter(
+        (video) =>
+          video &&
+          video.id && // Basic validation
+          !subscribedChannelIds.has(video.channelId) &&
+          !watchedSet.has(video.id) &&
+          !recommendations.some((rec) => rec.id === video.id)
+      );
+
+      console.log(
+        `Found ${uniqueNewVideos.length} unique, new videos for term "${searchTerm}"`
+      );
+      recommendations = recommendations.concat(uniqueNewVideos);
+
+      if (recommendations.length >= maxRecommendations) break;
     }
 
-    // If we still have no results, try trending videos
-    if (allSearchResults.length === 0) {
-      console.log("No results found. Trying trending videos as fallback...");
-
+    // Attempt 2: Supplement with trending videos if needed (using API Key)
+    if (
+      recommendations.length < maxRecommendations &&
+      process.env.YOUTUBE_API_KEY
+    ) {
+      console.log("Fetching trending videos (API Key) to supplement...");
       try {
-        // Create YouTube API client with the global API key
-        if (!process.env.YOUTUBE_API_KEY) {
-          console.error("YouTube API key is missing for trending videos!");
-          throw new Error("API key missing");
-        }
-
-        const youtubeDataApi = google.youtube({
+        const apiKeyYoutubeClient = google.youtube({
           version: "v3",
           auth: process.env.YOUTUBE_API_KEY,
         });
-
-        // Use videos.list with 'mostPopular' chart to get trending videos
-        const response = await youtubeDataApi.videos
-          .list({
-            part: "snippet,contentDetails,statistics",
-            chart: "mostPopular",
-            regionCode: "US", // Use US region code as default
-            maxResults: 20,
-          })
-          .catch((error) => {
-            console.error("YouTube trending API error:", error.message);
-            return null;
-          });
-
-        if (response && response.data && response.data.items) {
-          console.log(`Found ${response.data.items.length} trending videos`);
-
-          // Map trending videos to our format
-          const trendingVideos = response.data.items.map((item) => ({
-            id: item.id,
-            title: item.snippet.title,
-            description: item.snippet.description,
-            thumbnail: item.snippet.thumbnails.medium.url,
-            channelId: item.snippet.channelId,
-            channelTitle: item.snippet.channelTitle,
-            publishedAt: item.snippet.publishedAt,
-            discoveryCategory: "trending",
-            discoveryTerm: "trending videos",
-            category: item.snippet.categoryId || "Entertainment",
-            viewCount: item.statistics?.viewCount,
-            likeCount: item.statistics?.likeCount,
-            duration: item.contentDetails?.duration,
-          }));
-
-          allSearchResults = trendingVideos;
-        }
+        const trending = await getTrendingVideos(apiKeyYoutubeClient, 20);
+        const uniqueTrending = trending.filter(
+          (video) =>
+            video &&
+            video.id &&
+            !subscribedChannelIds.has(video.channelId) &&
+            !watchedSet.has(video.id) &&
+            !recommendations.some((rec) => rec.id === video.id)
+        );
+        console.log(`Adding ${uniqueTrending.length} unique trending videos.`);
+        recommendations = recommendations.concat(uniqueTrending);
       } catch (trendingError) {
-        console.error("Error fetching trending videos:", trendingError);
+        console.error("Failed to fetch trending videos:", trendingError);
+        // Don't fail the whole process if trending fails
       }
-    }
-
-    // As a last resort, provide mock data
-    if (allSearchResults.length === 0) {
-      console.log("All API attempts failed. Creating sample recommendations.");
-
-      allSearchResults = [
-        {
-          id: "dQw4w9WgXcQ",
-          title: "Rick Astley - Never Gonna Give You Up (Official Music Video)",
-          description:
-            'The official music video for "Never Gonna Give You Up" by Rick Astley',
-          thumbnail: "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg",
-          channelId: "UCuAXFkgsw1L7xaCfnd5JJOw",
-          channelTitle: "Rick Astley",
-          publishedAt: "2009-10-25T06:57:33Z",
-          discoveryCategory: "music",
-          discoveryTerm: "classic music videos",
-          category: "Music",
-          viewCount: "1200000000",
-          likeCount: "12000000",
-          duration: "PT3M33S",
-        },
-        {
-          id: "jNQXAC9IVRw",
-          title: "Me at the zoo",
-          description: "The first video on YouTube",
-          thumbnail: "https://i.ytimg.com/vi/jNQXAC9IVRw/mqdefault.jpg",
-          channelId: "UC4QobU6STFB0P71PMvOGN5A",
-          channelTitle: "jawed",
-          publishedAt: "2005-04-23T14:31:52Z",
-          discoveryCategory: "entertainment",
-          discoveryTerm: "youtube history",
-          category: "Entertainment",
-          viewCount: "228000000",
-          likeCount: "11000000",
-          duration: "PT0M19S",
-        },
-        {
-          id: "9bZkp7q19f0",
-          title: "PSY - GANGNAM STYLE(강남스타일) M/V",
-          description: "Official music video for PSY - GANGNAM STYLE",
-          thumbnail: "https://i.ytimg.com/vi/9bZkp7q19f0/mqdefault.jpg",
-          channelId: "UCrDkAvwZum-UTjHmzDI2iIw",
-          channelTitle: "officialpsy",
-          publishedAt: "2012-07-15T07:46:32Z",
-          discoveryCategory: "music",
-          discoveryTerm: "popular music videos",
-          category: "Music",
-          viewCount: "4500000000",
-          likeCount: "24000000",
-          duration: "PT4M13S",
-        },
-      ];
-    }
-
-    // 6. Filter out videos from subscribed channels and already watched videos
-    const filteredResults = allSearchResults.filter((video) => {
-      // Only filter out subscribed channels if we have subscription data
-      const passesSubscriptionFilter =
-        subscribedChannelIds.length === 0 ||
-        !subscribedChannelIds.includes(video.channelId);
-
-      // Only filter out watched videos if we have watch history
-      const passesWatchHistoryFilter =
-        watchedVideoIds.length === 0 || !watchedVideoIds.includes(video.id);
-
-      return passesSubscriptionFilter && passesWatchHistoryFilter;
-    });
-
-    console.log(
-      `Found ${filteredResults.length} videos after filtering out subscribed channels and watched videos`
-    );
-
-    // 7. Ensure diversity in the final results by selecting from each category
-    let diverseResults = [];
-
-    // Group by discovery category
-    const groupedByCategory = {};
-    filteredResults.forEach((video) => {
-      if (!groupedByCategory[video.discoveryCategory]) {
-        groupedByCategory[video.discoveryCategory] = [];
-      }
-      groupedByCategory[video.discoveryCategory].push(video);
-    });
-
-    // Take a few videos from each category to ensure diversity
-    Object.keys(groupedByCategory).forEach((category) => {
-      // Shuffle the videos in this category
-      const categoryVideos = groupedByCategory[category].sort(
-        () => Math.random() - 0.5
+    } else if (
+      recommendations.length < maxRecommendations &&
+      !process.env.YOUTUBE_API_KEY
+    ) {
+      console.warn(
+        "YOUTUBE_API_KEY missing, cannot fetch trending videos as fallback."
       );
-
-      // Take 2-4 videos from each category
-      const videosToTake = Math.min(
-        Math.floor(Math.random() * 3) + 2,
-        categoryVideos.length
-      );
-
-      diverseResults = diverseResults.concat(
-        categoryVideos.slice(0, videosToTake)
-      );
-    });
-
-    // If we have very few results after filtering, use the original filtered results
-    if (diverseResults.length < 5 && filteredResults.length > 0) {
-      console.log("Too few diverse results, using filtered results");
-      diverseResults = filteredResults;
     }
 
-    // If we still have very few results, use unfiltered results
-    if (diverseResults.length < 5 && allSearchResults.length > 0) {
-      console.log("Too few results after filtering, using unfiltered results");
-      diverseResults = allSearchResults;
-    }
+    // Final processing: Deduplicate and limit
+    recommendations = recommendations
+      .filter(
+        (video, index, self) =>
+          video &&
+          video.id &&
+          index === self.findIndex((v) => v && v.id === video.id)
+      )
+      .slice(0, maxRecommendations)
+      .sort(() => Math.random() - 0.5); // Shuffle final list
 
-    // 8. Shuffle the final list to avoid grouping by category
-    diverseResults = diverseResults.sort(() => Math.random() - 0.5);
-
-    // 9. Get detailed information including categories
-    const enhancedVideos = await enhanceVideosWithCategories(diverseResults);
+    console.log(`Generated ${recommendations.length} final recommendations.`);
 
     return {
-      videos: enhancedVideos,
-      source: "YouTube Discovery API",
-      searchTerm: usedTerms.join(", "),
-      categories: selectedCategories,
+      videos: recommendations,
+      // Add any other metadata if needed later
     };
   } catch (error) {
-    console.error("Error getting intelligent recommendations:", error);
-
-    // Return a fallback response
-    return {
-      videos: [],
-      source: "Error occurred",
-      searchTerm: "Fallback",
-      error: error.message,
-    };
+    console.error("Error during recommendation generation:", error);
+    // Re-throw auth errors
+    if (error.message === "Invalid Credentials") {
+      throw error;
+    }
+    // Return empty list for other errors
+    return { videos: [], error: error.message };
   }
 }
 
-// Generate discovery terms for diverse content
+// Provides a diverse set of search terms grouped by category
 function getDiscoveryTerms() {
-  // Define categories with associated search terms
+  // Using a simplified list for brevity, expand as needed
   const categoryTerms = {
     education: [
       "documentary",
       "science experiment",
       "history of",
-      "how things work",
-      "physics explained",
-      "biology basics",
-      "mathematics tutorial",
       "learn language",
-      "university lecture",
-      "educational animation",
     ],
-    creative: [
-      "art lessons",
-      "music theory",
-      "filmmaking techniques",
-      "creative writing",
-      "drawing tutorial",
-      "painting techniques",
-      "animation breakdown",
-      "craft ideas",
-      "design process",
-      "creative storytelling",
-    ],
-    professional: [
-      "programming tutorial",
-      "business strategy",
-      "marketing fundamentals",
-      "public speaking tips",
-      "leadership skills",
-      "career advice",
-      "productivity hacks",
-      "startup stories",
-      "financial literacy",
-      "workplace tips",
-    ],
+    creative: ["art lessons", "music theory", "filmmaking", "drawing tutorial"],
+    tech: ["tech review", "coding tutorial", "AI explained", "gadgets"],
     lifestyle: [
       "cooking tutorial",
-      "gardening tips",
-      "interior design",
       "fitness routine",
-      "sustainable living",
-      "mindfulness practice",
-      "travel guide",
-      "life hacks",
-      "home renovation",
-      "organization tips",
+      "travel vlog",
+      "gardening",
     ],
     entertainment: [
       "film analysis",
-      "book review",
-      "philosophy lecture",
       "comedy sketch",
-      "dance performance",
-      "magic tricks",
-      "storytelling",
-      "poetry reading",
       "concert highlights",
-      "theater performance",
-    ],
-    technology: [
-      "tech review",
-      "future technology",
-      "AI explanation",
-      "robotics demonstration",
-      "smart home setup",
-      "coding challenge",
-      "digital art",
-      "game development",
-      "tech history",
-      "software tutorial",
-    ],
-    niche: [
-      "unusual hobbies",
-      "rare collections",
-      "forgotten history",
-      "strange phenomena",
-      "hidden places",
-      "unique cultures",
-      "bizarre foods",
-      "unexplained mysteries",
-      "antique restoration",
-      "obscure sports",
-    ],
-    sports: [
-      "extreme sports highlights",
-      "Olympic moments",
-      "sports analysis",
-      "training techniques",
-      "sports history",
-      "athlete interview",
-      "team dynamics",
-      "sports science",
-      "underdog stories",
-      "game strategy",
+      "book review",
     ],
     science: [
       "space exploration",
-      "quantum physics",
-      "medical breakthroughs",
-      "evolutionary biology",
-      "climate science",
-      "neuroscience discoveries",
-      "chemistry experiments",
-      "astronomy visualization",
-      "geology explained",
-      "scientific mysteries",
+      "neuroscience",
+      "climate change facts",
+      "quantum physics simplified",
     ],
-    nature: [
-      "wildlife documentary",
-      "ocean exploration",
-      "rainforest ecology",
-      "animal behavior",
-      "natural wonders",
-      "nature photography",
-      "conservation efforts",
-      "plant species",
-      "weather phenomena",
-      "ecosystem balance",
-    ],
+    // Add many more categories and terms for better diversity
   };
-
-  // Flatten into array but maintain category information for later use
   const allTerms = [];
-
   Object.entries(categoryTerms).forEach(([category, terms]) => {
     terms.forEach((term) => {
-      allTerms.push({
-        term: term,
-        category: category,
-      });
+      allTerms.push({ term, category });
     });
   });
-
   return allTerms;
 }
 
-// Search YouTube videos (helper function)
+// Searches YouTube using the provided (authenticated) client
 async function searchYouTubeVideos(youtube, searchTerm, maxResults = 10) {
+  console.log(
+    `Searching YouTube (user auth) for "${searchTerm}" (Max: ${maxResults})`
+  );
   try {
-    console.log(`Searching YouTube for: ${searchTerm}`);
-
-    // Create YouTube API client with error checking for API key
-    if (!process.env.YOUTUBE_API_KEY) {
-      console.error("YouTube API key is missing!");
-      return [];
-    }
-
-    const youtubeDataApi = google.youtube({
-      version: "v3",
-      auth: process.env.YOUTUBE_API_KEY,
+    const response = await youtube.search.list({
+      part: "snippet",
+      q: searchTerm,
+      type: "video",
+      maxResults: maxResults,
+      videoEmbeddable: "true", // Useful filter
+      // regionCode: 'US' // Optional: Bias search results
     });
 
-    // Search for videos with additional error handling
-    const response = await youtubeDataApi.search
-      .list({
-        part: "snippet",
-        q: searchTerm,
-        maxResults: maxResults,
-        type: "video",
-        // Remove empty videoCategoryId that's causing the "invalid argument" error
-        // videoCategoryId: "", // All categories
-      })
-      .catch((error) => {
-        console.error("YouTube search API error:", error.message);
-        // Return null to indicate API error
-        return null;
-      });
+    if (!response.data.items || response.data.items.length === 0) return [];
 
-    // If API call failed, return empty array
-    if (!response || !response.data || !response.data.items) {
-      console.warn("Failed to get search results from YouTube API");
-      return [];
-    }
+    // Get video IDs from search results
+    const videoIds = response.data.items
+      .map((item) => item.id?.videoId)
+      .filter((id) => id);
+    if (videoIds.length === 0) return [];
 
-    // Transform YouTube API response into our simplified format
-    return response.data.items.map((item) => ({
-      id: item.id.videoId,
-      title: item.snippet.title,
-      description: item.snippet.description,
-      thumbnail: item.snippet.thumbnails.medium.url,
-      channelId: item.snippet.channelId,
-      channelTitle: item.snippet.channelTitle,
-      publishedAt: item.snippet.publishedAt,
-    }));
+    // Fetch full video details for the found IDs using the *same client*
+    const detailsResponse = await youtube.videos.list({
+      part: "snippet,contentDetails,statistics",
+      id: videoIds.join(","),
+      maxResults: videoIds.length, // Ensure we ask for details for all found IDs
+    });
+
+    // Convert the detailed items to our model
+    return (
+      detailsResponse.data.items
+        ?.map((item) => convertVideoItemToModel(item))
+        .filter((v) => v) || []
+    );
   } catch (error) {
-    console.error("Error searching YouTube:", error);
-    return [];
+    console.error(
+      `Error searching YouTube for "${searchTerm}":`,
+      error.response?.data?.error || error.message
+    );
+    // Re-throw auth errors
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      throw new Error("Invalid Credentials");
+    }
+    return []; // Return empty on other errors
   }
 }
 
-// Enhance videos with category information
-async function enhanceVideosWithCategories(videos) {
-  // Check for null or empty videos array
-  if (!videos || videos.length === 0) {
-    console.warn("No videos to enhance with categories");
+// Fetches trending videos using the provided client (should be API Key client)
+async function getTrendingVideos(youtubeApiKeyClient, maxResults = 10) {
+  console.log("Fetching trending videos (API Key)...");
+  try {
+    const response = await youtubeApiKeyClient.videos.list({
+      part: "snippet,contentDetails,statistics",
+      chart: "mostPopular",
+      regionCode: "US", // Consider making this configurable
+      maxResults: maxResults,
+    });
+    return (
+      response.data.items
+        ?.map((item) => convertVideoItemToModel(item))
+        .filter((v) => v) || []
+    );
+  } catch (error) {
+    console.error(
+      "Error fetching trending videos:",
+      error.response?.data?.error || error.message
+    );
+    // Log API key specific errors differently if helpful
+    return []; // Don't throw, just return empty
+  }
+}
+
+// Converts a YouTube API video item to our simplified Video model
+function convertVideoItemToModel(item) {
+  if (!item || !item.id || !item.snippet) return null;
+  const snippet = item.snippet;
+  const stats = item.statistics;
+  const details = item.contentDetails;
+
+  // Prefer standard or high-res thumbnails
+  const thumbnailUrl =
+    snippet.thumbnails?.standard?.url ||
+    snippet.thumbnails?.high?.url ||
+    snippet.thumbnails?.medium?.url ||
+    snippet.thumbnails?.default?.url;
+
+  // Basic validation
+  if (!thumbnailUrl || !snippet.channelId || !snippet.channelTitle) return null;
+
+  return {
+    id: item.id,
+    title: snippet.title || "No Title",
+    description: snippet.description || null,
+    channelId: snippet.channelId,
+    channelTitle: snippet.channelTitle,
+    thumbnailUrl: thumbnailUrl,
+    publishedAt: snippet.publishedAt || null, // Keep as ISO string
+    viewCount: stats?.viewCount ? parseInt(stats.viewCount, 10) : null,
+    likeCount: stats?.likeCount ? parseInt(stats.likeCount, 10) : null,
+    duration: details?.duration || null, // Keep ISO 8601 duration string
+  };
+}
+
+// Extracts unique video IDs from Takeout JSON data
+function extractVideoIdsFromTakeout(watchHistoryData) {
+  if (!Array.isArray(watchHistoryData)) {
+    console.error("Watch history data is not an array");
     return [];
   }
-
-  try {
-    // Get list of video IDs
-    const videoIds = videos.map((video) => video.id).filter((id) => id);
-
-    // If no valid IDs, return original videos
-    if (videoIds.length === 0) {
-      console.warn("No valid video IDs found to enhance");
-      return videos;
-    }
-
-    // Check for API key
-    if (!process.env.YOUTUBE_API_KEY) {
-      console.error("YouTube API key is missing for video enhancement!");
-      return videos;
-    }
-
-    // Create YouTube API client with the global API key
-    const youtubeDataApi = google.youtube({
-      version: "v3",
-      auth: process.env.YOUTUBE_API_KEY,
-    });
-
-    // Fetch detailed video data from YouTube API
-    // We're requesting snippet, contentDetails, statistics, and topicDetails
-    // to get rich information about each video
-    const response = await youtubeDataApi.videos
-      .list({
-        part: "snippet,contentDetails,statistics,topicDetails",
-        id: videoIds.join(","),
-        maxResults: 50,
-      })
-      .catch((error) => {
-        console.error("YouTube API error:", error.message);
-        // Return null to indicate API error
-        return null;
-      });
-
-    // If API call failed, return original videos
-    if (!response || !response.data || !response.data.items) {
-      console.warn("Failed to get enhanced video data from YouTube API");
-      return videos;
-    }
-
-    // Category mapping for readability
-    const categoryMapping = {
-      1: "Film & Animation",
-      2: "Autos & Vehicles",
-      10: "Music",
-      15: "Pets & Animals",
-      17: "Sports",
-      18: "Short Movies",
-      19: "Travel & Events",
-      20: "Gaming",
-      21: "Videoblogging",
-      22: "People & Blogs",
-      23: "Comedy",
-      24: "Entertainment",
-      25: "News & Politics",
-      26: "Howto & Style",
-      27: "Education",
-      28: "Science & Technology",
-      29: "Nonprofits & Activism",
-      30: "Movies",
-      31: "Anime/Animation",
-      32: "Action/Adventure",
-      33: "Classics",
-      34: "Comedy",
-      35: "Documentary",
-      36: "Drama",
-      37: "Family",
-      38: "Foreign",
-      39: "Horror",
-      40: "Sci-Fi/Fantasy",
-      41: "Thriller",
-      42: "Shorts",
-      43: "Shows",
-      44: "Trailers",
-    };
-
-    // Topic mapping for better categorization
-    const topicMapping = {
-      "/m/04rlf": "Music",
-      "/m/05fw6t": "Children's music",
-      "/m/02mscn": "Christian music",
-      "/m/0ggq0m": "Classical music",
-      "/m/01lyv": "Country",
-      "/m/02lkt": "Electronic music",
-      "/m/0glt670": "Hip hop music",
-      "/m/05rwpb": "Independent music",
-      "/m/03_d0": "Jazz",
-      "/m/028sqc": "Music of Asia",
-      "/m/0g293": "Music of Latin America",
-      "/m/064t9": "Pop music",
-      "/m/06cqb": "Reggae",
-      "/m/06j6l": "Rhythm and blues",
-      "/m/06by7": "Rock music",
-      "/m/0gywn": "Soul music",
-      "/m/07s6nbt": "Action game",
-      "/m/025zzc": "Action-adventure game",
-      "/m/02ntfj": "Casual game",
-      "/m/03hf_rm": "Music video game",
-      "/m/04q1x3q": "Puzzle video game",
-      "/m/01sjng": "Racing video game",
-      "/m/0403l3g": "Role-playing video game",
-      "/m/021bp2": "Simulation video game",
-      "/m/022dc6": "Sports game",
-      "/m/03hf5t": "Strategy video game",
-      "/m/06ntj": "Sports",
-      "/m/0jm_": "American football",
-      "/m/018jz": "Baseball",
-      "/m/018w8": "Basketball",
-      "/m/01cgz": "Boxing",
-      "/m/09xp_": "Cricket",
-      "/m/02vx4": "Football",
-      "/m/037hz": "Golf",
-      "/m/03tmr": "Ice hockey",
-      "/m/01h7lh": "Mixed martial arts",
-      "/m/05hs7w": "Motorsport",
-      "/m/066wd": "Professional wrestling",
-      "/m/07bs0": "Tennis",
-      "/m/07_53": "Volleyball",
-      "/m/02jjt": "Entertainment",
-      "/m/09kqc": "Humor",
-      "/m/02vxn": "Movies",
-      "/m/05qjc": "Performing arts",
-      "/m/066wd": "Professional wrestling",
-      "/m/0f2f9": "TV shows",
-      "/m/019_rr": "Lifestyle",
-      "/m/032tl": "Fashion",
-      "/m/027x7n": "Fitness",
-      "/m/02wbm": "Food",
-      "/m/03glg": "Hobby",
-      "/m/068hy": "Pets",
-      "/m/041xxh": "Physical attractiveness",
-      "/m/07c1v": "Technology",
-      "/m/07bxq": "Tourism",
-      "/m/07k1x": "Vehicles",
-      "/m/01k8wb": "Knowledge",
-      "/m/098wr": "Society",
-    };
-
-    // Create a map of enhanced video details
-    const videoDetailsMap = {};
-    response.data.items.forEach((item) => {
-      const videoId = item.id;
-      const snippet = item.snippet || {};
-      const statistics = item.statistics || {};
-      const contentDetails = item.contentDetails || {};
-      const topicDetails = item.topicDetails || {};
-
-      // Map category ID to readable name
-      const categoryId = snippet.categoryId;
-      const categoryName = categoryMapping[categoryId] || null;
-
-      // Extract topics if available
-      let topics = [];
-      if (topicDetails && topicDetails.topicCategories) {
-        topics = topicDetails.topicCategories.map((topicUrl) => {
-          // Extract the topic ID from the URL
-          const topicId = topicUrl.split("/").pop();
-          // Map to readable name if available
-          return (
-            topicMapping[`/m/${topicId}`] ||
-            topicUrl.split("/").pop().replace(/_/g, " ")
-          );
-        });
+  const videoIds = new Set(); // Use a Set for automatic deduplication
+  watchHistoryData.forEach((entry) => {
+    try {
+      // Look for YouTube watch URLs
+      if (
+        entry.titleUrl &&
+        entry.titleUrl.startsWith("https://www.youtube.com/watch?v=")
+      ) {
+        const urlObj = new URL(entry.titleUrl);
+        const videoId = urlObj.searchParams.get("v");
+        if (videoId) {
+          videoIds.add(videoId);
+        }
       }
-
-      videoDetailsMap[videoId] = {
-        category: categoryName,
-        topics: topics,
-        tags: snippet.tags || [],
-        duration: contentDetails.duration,
-        viewCount: statistics.viewCount,
-        likeCount: statistics.likeCount,
-        commentCount: statistics.commentCount,
-        publishedAt: snippet.publishedAt,
-      };
-    });
-
-    // Combine original video data with enhanced details
-    return videos.map((video) => {
-      const enhancedDetails = videoDetailsMap[video.id] || {};
-      return {
-        ...video,
-        ...enhancedDetails,
-      };
-    });
-  } catch (error) {
-    console.error("Error enhancing videos with categories:", error);
-    // Return original videos if enhancement fails
-    return videos;
-  }
+    } catch (err) {
+      // Log problematic entries but continue processing
+      console.warn(
+        `Skipping entry due to error processing watch history entry: ${err.message}`,
+        entry.titleUrl
+      );
+    }
+  });
+  return Array.from(videoIds); // Convert Set back to Array
 }
 
-// Helper function to clean up old uploaded files
+// Cleans up old files from the upload directory
 function cleanupOldUploadedFiles() {
-  const fs = require("fs");
-  const path = require("path");
-  const uploadsDir = path.join(__dirname, "../uploads/");
-
-  // Read all files in the uploads directory
-  fs.readdir(uploadsDir, (err, files) => {
+  const uploadPath = path.join(__dirname, "uploads");
+  fs.readdir(uploadPath, (err, files) => {
     if (err) {
-      console.error("Error reading uploads directory:", err);
+      if (err.code === "ENOENT") return; // Directory doesn't exist, nothing to clean
+      console.error("Error reading uploads directory for cleanup:", err);
       return;
     }
-
-    // Current time
     const now = Date.now();
-
-    // Check each file
     files.forEach((file) => {
-      const filePath = path.join(uploadsDir, file);
-
-      // Get file stats
-      fs.stat(filePath, (err, stats) => {
-        if (err) {
-          console.error(`Error getting stats for file ${file}:`, err);
+      const filePath = path.join(uploadPath, file);
+      fs.stat(filePath, (statErr, stats) => {
+        if (statErr) {
+          // Handle cases where file might be deleted between readdir and stat
+          if (statErr.code !== "ENOENT") {
+            console.error(`Error getting stats for file ${file}:`, statErr);
+          }
           return;
         }
-
-        // Calculate file age in hours
-        const fileAge = (now - stats.mtime.getTime()) / (1000 * 60 * 60);
-
         // Delete files older than 1 hour
-        if (fileAge > 1) {
-          fs.unlink(filePath, (err) => {
-            if (err) {
-              console.error(`Error deleting file ${file}:`, err);
-            } else {
-              console.log(`Deleted old upload file: ${file}`);
+        const fileAgeHours = (now - stats.mtime.getTime()) / (1000 * 60 * 60);
+        if (fileAgeHours > 1) {
+          fs.unlink(filePath, (unlinkErr) => {
+            if (unlinkErr && unlinkErr.code !== "ENOENT") {
+              console.error(`Error deleting file ${file}:`, unlinkErr);
+            } else if (!unlinkErr) {
+              console.log(`Cleaned up old upload file: ${file}`);
             }
           });
         }
@@ -1743,13 +1292,58 @@ function cleanupOldUploadedFiles() {
   });
 }
 
-// Run cleanup every hour
+// --- Static File Serving & Catch-all (For React Frontend) ---
+
+// Serve static files from the React app's build directory (Vite uses 'dist')
+const staticFilesPath = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "frontend-react",
+  "dist"
+);
+console.log(`Configuring static file serving from: ${staticFilesPath}`);
+app.use(express.static(staticFilesPath));
+
+// The "catchall" handler for client-side routing
+app.get("*", (req, res, next) => {
+  // Exclude API routes and Auth routes from the catchall
+  if (req.path.startsWith("/api/") || req.path.startsWith("/auth/")) {
+    return next(); // Pass to 404 handler if no API route matches
+  }
+
+  const indexPath = path.join(staticFilesPath, "index.html");
+  fs.access(indexPath, fs.constants.F_OK, (err) => {
+    if (err) {
+      console.warn("React build index.html not found at:", indexPath);
+      // Send a more informative message if the frontend isn't built/found
+      res
+        .status(404)
+        .send(
+          `<h1>Frontend not found</h1>` +
+            `<p>Ensure the React app in 'frontend-react' is built (e.g., run 'npm run build' inside the 'frontend-react' directory).</p>` +
+            `<p>Expected location: ${indexPath}</p>`
+        );
+    } else {
+      // Serve the main HTML file for any non-API, non-Auth request
+      res.sendFile(indexPath);
+    }
+  });
+});
+
+// --- Server Startup ---
+
+// Run initial cleanup
+cleanupOldUploadedFiles();
+// Run cleanup periodically (e.g., every hour)
 setInterval(cleanupOldUploadedFiles, 60 * 60 * 1000);
 
-// Run cleanup on app start
-cleanupOldUploadedFiles();
-
-// Start the server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`API Server listening on port ${PORT}`);
+  console.log(
+    `Frontend URL configured for CORS/Redirects: ${
+      process.env.FRONTEND_URL || "http://localhost:3001"
+    }`
+  );
+  console.log(`Serving frontend static files from: ${staticFilesPath}`);
 });

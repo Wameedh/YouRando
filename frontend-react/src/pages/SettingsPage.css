@@ -1,0 +1,147 @@
+.settings-page {
+  max-width: 800px;
+  margin: 20px auto;
+  padding: 30px;
+  background-color: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  text-align: left;
+}
+
+.settings-page h2 {
+  text-align: center;
+  margin-bottom: 30px;
+  color: #333;
+}
+
+.settings-page h3 {
+  margin-top: 30px;
+  margin-bottom: 15px;
+  color: #444;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 5px;
+}
+
+.settings-section {
+  margin-bottom: 30px;
+}
+
+.settings-form, .upload-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px; /* Spacing between form elements/groups */
+}
+
+.form-group {
+  margin-bottom: 15px; /* Consistent spacing for groups */
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #555;
+}
+
+.form-select,
+.form-file-input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 1rem;
+  box-sizing: border-box; /* Include padding and border in element's total width and height */
+}
+
+.form-file-input {
+  padding: 8px; /* Slightly less padding for file input */
+}
+
+.category-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+  padding-left: 5px;
+}
+
+.checkbox-item {
+  display: flex;
+  align-items: center;
+}
+
+.checkbox-item input[type="checkbox"] {
+  margin-right: 8px;
+}
+
+.checkbox-item label {
+  font-weight: normal;
+  margin-bottom: 0; /* Override default label margin */
+  color: #333;
+}
+
+.section-divider {
+  border: 0;
+  height: 1px;
+  background-color: #eee;
+  margin: 40px 0;
+}
+
+.history-status {
+  font-style: italic;
+  color: #555;
+  margin-bottom: 10px;
+}
+
+.history-info {
+  color: #666;
+  font-size: 0.95rem;
+  margin-bottom: 20px;
+}
+
+.history-info code {
+  background-color: #f0f0f0;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+/* General error message style (reuse from Dashboard) */
+.error-message {
+  color: #d9534f;
+  background-color: #f2dede;
+  border: 1px solid #ebccd1;
+  padding: 15px;
+  border-radius: 4px;
+  margin-bottom: 20px;
+}
+
+/* Specific style for upload errors */
+.upload-error {
+    margin-top: 15px;
+}
+
+/* Status message styling */
+.status-message {
+    padding: 15px;
+    border-radius: 4px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+.status-message.success {
+    color: #3c763d;
+    background-color: #dff0d8;
+    border: 1px solid #d6e9c6;
+}
+.status-message.info {
+    color: #31708f;
+    background-color: #d9edf7;
+    border: 1px solid #bce8f1;
+}
+
+/* Ensure buttons have some top margin when following inputs */
+.settings-form button[type="submit"],
+.upload-form button[type="submit"] {
+    margin-top: 10px;
+    align-self: flex-start; /* Align button to the left */
+} 
