@@ -129,6 +129,93 @@ const isAuthenticatedAPI = (req, res, next) => {
   res.status(401).json({ message: "Unauthorized: Please log in." });
 };
 
+// Middleware to verify Bearer token for API routes
+const isAuthenticatedTokenAPI = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    // If no Bearer token, let the next middleware (potentially session auth) handle it
+    return next();
+  }
+
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).json({ message: "Malformed Bearer token." });
+  }
+
+  try {
+    // Verify token with Google
+    const tokenInfoUrl = `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${token}`;
+    const response = await axios.get(tokenInfoUrl);
+    const tokenInfo = response.data;
+
+    // Check if the token is valid and matches our client ID (optional but recommended)
+    // Note: Add your specific Client ID check if needed, might vary for different client types
+    // const audience = tokenInfo.aud;
+    // if (audience !== process.env.GOOGLE_CLIENT_ID) {
+    //   console.warn("Token audience mismatch:", audience);
+    //   return res.status(401).json({ message: "Invalid token audience." });
+    // }
+
+    // Check if token is expired (though Google's endpoint should handle this)
+    if (tokenInfo.expires_in <= 0) {
+      return res.status(401).json({ message: "Token expired." });
+    }
+
+    // Token is valid, construct a user object for the request context
+    // Note: This user object will be simpler than the session one,
+    // lacking refresh tokens and potentially detailed profile info unless fetched separately.
+    // Settings and history will need to be fetched from DB based on user ID/email later.
+    req.user = {
+      id: tokenInfo.sub, // Google's unique user ID
+      accessToken: token, // Store the verified token
+      // Mimic profile structure for consistency, fetching from DB is better
+      profile: {
+        email: tokenInfo.email,
+        name: null, // Not reliably available from tokeninfo
+        picture: null, // Not reliably available from tokeninfo
+      },
+      // Placeholders - These MUST be loaded from persistent storage in real implementation
+      settings: { discoveryLevel: "moderate", excludedCategories: [] },
+      watchHistory: [],
+      lastHistoryUpload: null,
+      hasHistoryAccess: false, // Assume false unless proven otherwise (e.g., fetched from DB)
+    };
+    console.log(
+      `User authenticated via Bearer token: ${req.user.profile.email}`
+    );
+    return next(); // Token authentication successful
+  } catch (error) {
+    console.error(
+      "Bearer token verification failed:",
+      error.response?.data || error.message
+    );
+    // Distinguish between Google error and other errors
+    if (error.response && error.response.status === 400) {
+      return res.status(401).json({ message: "Invalid token." });
+    }
+    if (error.response && error.response.status === 401) {
+      return res.status(401).json({ message: "Token expired or revoked." });
+    }
+    return res.status(500).json({ message: "Token verification failed." });
+  }
+};
+
+// Combined Authentication Middleware for API routes
+// Tries Session auth first, then falls back to Bearer token auth.
+const authenticateRequest = (req, res, next) => {
+  if (req.isAuthenticated()) {
+    // User is authenticated via session
+    console.log(
+      `User authenticated via Session: ${
+        req.user?.profile?.email || req.user?.id
+      }`
+    );
+    return next();
+  }
+  // No active session, try token authentication
+  isAuthenticatedTokenAPI(req, res, next);
+};
+
 // Middleware to check if user is authenticated for VIEW routes (redirects)
 const isAuthenticated = (req, res, next) => {
   if (req.isAuthenticated() && req.user) {
@@ -189,13 +276,17 @@ app.post("/auth/logout", (req, res, next) => {
 });
 
 // API endpoint to check user authentication status
-app.get("/api/user/status", isAuthenticatedAPI, (req, res) => {
-  // isAuthenticatedAPI already ensures req.user exists
+app.get("/api/user/status", authenticateRequest, (req, res) => {
+  // authenticateRequest ensures req.user exists if auth is successful
+  // The structure of req.user might differ slightly between session and token
+  // Session: has full profile, settings, maybe history
+  // Token: has accessToken, email, google id (sub), maybe placeholder settings/history
   res.json({
     isAuthenticated: true,
-    user: req.user.profile, // Send profile info
-    settings: req.user.settings, // Send current settings
-    lastHistoryUpload: req.user.lastHistoryUpload,
+    // Adjust response based on potential differences in req.user structure
+    user: req.user.profile, // Assume profile exists, might need refinement
+    settings: req.user.settings, // Might be placeholder if from token
+    lastHistoryUpload: req.user.lastHistoryUpload, // Might be placeholder if from token
   });
 });
 
@@ -334,7 +425,7 @@ function handleUploadErrors(fieldName) {
 
 app.post(
   "/api/user/watch-history/upload",
-  isAuthenticatedAPI,
+  authenticateRequest,
   handleUploadErrors("historyFile"), // Use the Multer error handler middleware
   async (req, res) => {
     if (!req.file) {
@@ -446,7 +537,7 @@ function createYoutubeClient(accessToken) {
 }
 
 // API route to export user data
-app.get("/api/user/data/export", isAuthenticated, async (req, res) => {
+app.get("/api/user/data/export", authenticateRequest, async (req, res) => {
   try {
     const youtube = createYoutubeClient(req.user.accessToken);
 
@@ -489,7 +580,7 @@ app.get("/api/user/data/export", isAuthenticated, async (req, res) => {
 });
 
 // API route to get random recommendations
-app.get("/api/recommendations", isAuthenticated, async (req, res) => {
+app.get("/api/recommendations", authenticateRequest, async (req, res) => {
   try {
     const youtube = createYoutubeClient(req.user.accessToken);
 

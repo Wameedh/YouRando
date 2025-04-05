@@ -56,7 +56,7 @@ This document tracks implemented features and planned improvements for the YouRa
 - [ ] Implement persistent storage (e.g., MongoDB) for user profiles, settings, tokens, and processed watch history.
 - [ ] Refine and fully implement the `/api/user/watch-history/upload` endpoint for robust Takeout processing.
 - [ ] Fully implement `/api/user/data/export` and `/api/user/data` endpoints.
-- [ ] Implement token-based authentication (`Authorization: Bearer <token>`) for native clients (like tvOS).
+- [x] Implement token-based authentication (`Authorization: Bearer <token>`) for native clients (like tvOS) alongside session auth.
 - [ ] Enhance error handling and provide consistent JSON error responses.
 - [ ] Add input validation for API endpoints.
 - [ ] Consider API versioning.

@@ -24,21 +24,21 @@ The primary goal of this document is to enable developers or AI agents to unders
 *   **Authentication Flow (Web Focus):** Handles the server-side OAuth 2.0 flow with Google primarily for web clients:
     *   `/auth/google` redirects the user to Google's consent screen.
     *   `/auth/google/callback` receives the authorization code, exchanges it for tokens via Passport, stores user profile and tokens in the session, and redirects back to the frontend application URL.
-*   **YouTube Service Logic:** Functions interacting with the YouTube Data API v3 (e.g., `getUserSubscriptions`, `getIntelligentRecommendations`, `searchYouTubeVideos`, `getTrendingVideos`) reside within `index.js`. These use the authenticated user's access token (stored in `req.user.accessToken`).
-*   **Recommendation Logic:** Fetches video recommendations, filters based on subscriptions and watch history (if available from session/Takeout upload), and attempts to diversify results.
+*   **Authentication Flow (Native Focus):** Native clients (tvOS, mobile) handle their own OAuth 2.0 flow (e.g., using AppAuth) to obtain an Access Token. They send this token in the `Authorization: Bearer <token>` header with each API request.
+*   **YouTube Service Logic:** Functions interacting with the YouTube Data API v3 (e.g., `getIntelligentRecommendations`) reside within `index.js`. These use the authenticated user's access token (`req.user.accessToken`), available via either session or token authentication.
+*   **Recommendation Logic:** Fetches video recommendations, filters based on subscriptions and watch history (currently from session/Takeout upload; *requires DB for token users*), and attempts to diversify results.
 
 ### 2.3 Authentication & Authorization
 
-*   Authentication relies on Google OAuth 2.0 configured via `passport-google-oauth20`.
-*   The primary flow is session-based, suitable for web clients where the session cookie manages state after the initial OAuth redirect.
-*   API endpoints requiring user context are protected using the `isAuthenticatedAPI` middleware, which checks `req.isAuthenticated()`.
-*   **For Native Clients (e.g., tvOS):**
-    *   The current session-based flow is **not** suitable.
-    *   **Recommended Approach:** Implement **token-based authentication**. Native clients would perform their own OAuth flow to get an access token and send it in the `Authorization: Bearer <token>` header to backend API endpoints.
-    *   **Backend Changes Needed for Native Clients:**
-        *   Create a new authentication middleware that verifies the Bearer token (e.g., using Google's token info endpoint).
-        *   Modify protected API endpoints to use this new middleware instead of `isAuthenticatedAPI` or support both.
-        *   The backend would then use the provided token to make YouTube API calls, rather than relying on the token stored in the server-side session.
+*   Authentication relies on Google OAuth 2.0.
+*   **Dual Authentication Support:** The backend now supports both session-based (for web) and token-based (for native clients) authentication for its core API endpoints.
+*   **Session-Based (Web):** Uses `express-session` and Passport. After login via `/auth/google/callback`, a session cookie manages state.
+*   **Token-Based (Native):** Clients send an `Authorization: Bearer <ACCESS_TOKEN>` header. The `isAuthenticatedTokenAPI` middleware verifies this token using Google's `tokeninfo` endpoint.
+*   **Combined Middleware (`authenticateRequest`):** API endpoints are protected by this middleware. It first checks for a valid session (`req.isAuthenticated()`). If none exists, it attempts to validate a Bearer token via `isAuthenticatedTokenAPI`.
+*   **User Context (`req.user`):**
+    *   **Session:** `req.user` contains the full profile, access/refresh tokens, settings, and potentially watch history loaded during the session setup.
+    *   **Token:** `req.user` contains the access token, Google user ID (`sub`), email, and placeholder settings/history (*requires DB lookup for full data*).
+*   API endpoints requiring user context use the `authenticateRequest` middleware.
 
 ## 3. API Endpoints
 
@@ -68,8 +68,8 @@ This section details the primary HTTP endpoints provided by the YouRando backend
 ### 3.2 Core API
 
 *   **`GET /api/user/status`**
-    *   **Description:** Checks if the current user (based on session cookie) is authenticated and retrieves basic profile info.
-    *   **Authentication:** Requires active session cookie.
+    *   **Description:** Checks if the current user is authenticated (via session or token) and retrieves basic info.
+    *   **Authentication:** Requires active session cookie OR `Authorization: Bearer <token>` header (`authenticateRequest` middleware).
     *   **Response (Success - 200 OK):**
         ```json
         {
@@ -84,17 +84,16 @@ This section details the primary HTTP endpoints provided by the YouRando backend
           }
         }
         ```
-    *   **Response (Not Authenticated - 200 OK):**
+    *   **Response (Not Authenticated - 401 Unauthorized):**
         ```json
         {
-          "isAuthenticated": false,
-          "user": null
+          "message": "Unauthorized: Please log in." // Or token-specific error
         }
         ```
 
 *   **`GET /api/recommendations`**
     *   **Description:** Fetches randomized video recommendations for the authenticated user.
-    *   **Authentication:** Requires active session cookie (`isAuthenticatedAPI` middleware).
+    *   **Authentication:** Requires active session cookie OR `Authorization: Bearer <token>` header (`authenticateRequest` middleware).
     *   **Response Format (Success - 200 OK):**
         ```json
         {
@@ -110,7 +109,7 @@ This section details the primary HTTP endpoints provided by the YouRando backend
 
 *   **`GET /api/settings`**
     *   **Description:** Retrieves the current user's settings.
-    *   **Authentication:** Requires active session cookie.
+    *   **Authentication:** Requires active session cookie OR `Authorization: Bearer <token>` header (`authenticateRequest` middleware).
     *   **Response (Success - 200 OK):**
         ```json
         {
@@ -121,7 +120,7 @@ This section details the primary HTTP endpoints provided by the YouRando backend
 
 *   **`POST /api/settings`**
     *   **Description:** Updates the current user's settings.
-    *   **Authentication:** Requires active session cookie.
+    *   **Authentication:** Requires active session cookie OR `Authorization: Bearer <token>` header (`authenticateRequest` middleware).
     *   **Request Body (JSON):**
         ```json
         {
@@ -141,8 +140,8 @@ This section details the primary HTTP endpoints provided by the YouRando backend
 ### 3.3 File Upload (Placeholder)
 
 *   **`POST /api/user/watch-history/upload`**
-    *   **Description:** Endpoint for uploading Google Takeout watch history JSON file. (*Needs review and refinement*).
-    *   **Authentication:** Requires active session cookie.
+    *   **Description:** Endpoint for uploading Google Takeout watch history JSON file.
+    *   **Authentication:** Requires active session cookie OR `Authorization: Bearer <token>` header (`authenticateRequest` middleware).
     *   **Request:** `multipart/form-data` with a field named `history-file`.
     *   **Response (Success - 200 OK):**
         ```json
@@ -157,9 +156,9 @@ This section details the primary HTTP endpoints provided by the YouRando backend
 
 ### 3.4 Data Management (Placeholders)
 
-*   **`GET /api/user/data/export`**: Placeholder for exporting user data.
-*   **`DELETE /api/user/data`**: Placeholder for deleting user data.
-*   **`GET /api/user/access-status`**: Placeholder for checking token validity and scopes.
+*   **`GET /api/user/data/export`**: Placeholder for exporting user data. Requires auth.
+*   **`DELETE /api/user/data`**: Placeholder for deleting user data. Requires auth.
+*   **`GET /api/user/access-status`**: Placeholder for checking token validity and scopes. Requires auth.
 
 ## 4. Data Models (API Focused)
 
@@ -194,14 +193,14 @@ This section details the primary HTTP endpoints provided by the YouRando backend
 2.  **Implement OAuth Flow:** Use platform-specific libraries/methods (e.g., AppAuth for mobile/tvOS) to handle the Google Sign-In flow and obtain an **Access Token**.
 3.  **Backend API Interaction (Token-Based):**
     *   Send the obtained Access Token in the `Authorization` header for requests to protected API endpoints: `Authorization: Bearer <ACCESS_TOKEN>`.
-    *   The backend **needs to be modified** to validate this Bearer token using a new middleware (see Section 2.3).
+    *   The backend **is now configured** to accept and validate this Bearer token using the `authenticateRequest` middleware (which internally uses `isAuthenticatedTokenAPI`).
 4.  **API Key:** The `YOUTUBE_API_KEY` is used by the backend for certain non-authenticated calls (like fetching trending videos if needed) and remains a backend secret.
 
 ## 6. Key Considerations & Future Development
 
-*   **Implement Token-Based Auth:** Prioritize adding Bearer token validation middleware for native client support.
-*   **Persistent Storage:** Implement a database (e.g., MongoDB with Mongoose and `connect-mongo`) for sessions, user settings, and processed watch history.
-*   **Refine Takeout Upload:** Make the upload process more robust, handle larger files, and potentially run processing asynchronously.
+*   **Token-Based Auth:** Implemented. API endpoints now support both session and Bearer token.
+*   **Persistent Storage:** Implement a database (e.g., MongoDB with Mongoose and `connect-mongo`) for sessions, user settings, and processed watch history. This is crucial for making token-based user data (settings, history) persist beyond a single request.
+*   **Refine Takeout Upload:** Make the upload process more robust, handle larger files, and potentially run processing asynchronously. Ensure processed history is linked to user ID for DB storage.
 *   **API Error Handling:** Implement consistent JSON error responses with appropriate HTTP status codes.
 *   **Input Validation:** Add validation to API endpoints (e.g., for settings POST body).
 *   **Testing:** Add comprehensive unit and integration tests.
