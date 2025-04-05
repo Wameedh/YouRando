@@ -8,25 +8,36 @@ const axios = require("axios");
 const path = require("path");
 const multer = require("multer");
 const cors = require("cors");
-const mongoose = require("mongoose");
-const MongoStore = require("connect-mongo");
 const fs = require("fs");
 
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Set up view engine
-app.set("view engine", "ejs");
-app.set("views", path.join(__dirname, "views"));
-app.use(express.static(path.join(__dirname, "../public")));
+// Enable CORS - Configure appropriately for your frontend's origin in production
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3001", // Allow frontend origin
+    credentials: true, // Allow cookies/sessions
+  })
+);
 
-// Set up session
+// Body Parsers
+app.use(express.json()); // For parsing application/json
+app.use(express.urlencoded({ extended: true })); // For parsing application/x-www-form-urlencoded
+
+// Session Configuration (Consider using connect-mongo for persistence)
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "yourandonator",
+    secret: process.env.SESSION_SECRET || "yourandonator_api_secret",
     resave: false,
     saveUninitialized: false,
+    // store: MongoStore.create({ mongoUrl: process.env.MONGO_URI }), // Example persistence
+    cookie: {
+      secure: process.env.NODE_ENV === "production", // Use secure cookies in production
+      httpOnly: true, // Prevent client-side JS access
+      // sameSite: 'lax' // Consider 'strict' or 'none' based on your setup
+    },
   })
 );
 
@@ -36,11 +47,28 @@ app.use(passport.session());
 
 // Serialize/Deserialize user
 passport.serializeUser((user, done) => {
-  done(null, user);
+  // Store only necessary user info in session to keep it small
+  const sessionUser = {
+    id: user.id,
+    accessToken: user.accessToken,
+    refreshToken: user.refreshToken,
+    hasHistoryAccess: user.hasHistoryAccess,
+    watchHistory: user.watchHistory, // Consider if this gets too large for session
+    lastHistoryUpload: user.lastHistoryUpload,
+    settings: user.settings,
+    profile: {
+      // Store basic profile info if needed by frontend
+      name: user.name,
+      email: user.email,
+      picture: user.picture,
+    },
+  };
+  done(null, sessionUser);
 });
 
-passport.deserializeUser((user, done) => {
-  done(null, user);
+passport.deserializeUser((sessionUser, done) => {
+  // Retrieve the full user object if necessary, or just use the sessionUser
+  done(null, sessionUser);
 });
 
 // Define constants for OAuth scopes
@@ -65,21 +93,30 @@ passport.use(
     {
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: process.env.REDIRECT_URL,
+      callbackURL: process.env.REDIRECT_URL || "/auth/google/callback", // Should match Google Console
       scope: SCOPES.BASIC,
     },
-    (accessToken, refreshToken, profile, done) => {
-      // Save the tokens
-      const user = {
-        id: profile.id,
-        email: profile.emails[0].value,
-        name: profile.displayName,
-        accessToken,
-        refreshToken,
-        hasHistoryAccess: false, // Explicitly set to false for standard auth
-      };
-
-      return done(null, user);
+    async (accessToken, refreshToken, profile, done) => {
+      try {
+        const user = {
+          id: profile.id,
+          email: profile.emails?.[0]?.value,
+          name: profile.displayName,
+          picture: profile.photos?.[0]?.value,
+          accessToken,
+          refreshToken,
+          hasHistoryAccess: false, // Default to false
+          watchHistory: [],
+          lastHistoryUpload: null,
+          settings: { discoveryLevel: "moderate", excludedCategories: [] }, // Default settings
+        };
+        // Potentially fetch existing user settings/history from DB here
+        console.log("User Authenticated:", user.email);
+        return done(null, user);
+      } catch (error) {
+        console.error("Error during Google Strategy execution:", error);
+        return done(error, null);
+      }
     }
   )
 );
@@ -174,11 +211,17 @@ app.get(
 // Standard authentication callback
 app.get(
   "/auth/google/callback",
-  passport.authenticate("google", { failureRedirect: "/" }),
+  passport.authenticate("google", {
+    failureRedirect: `${
+      process.env.FRONTEND_URL || "http://localhost:3001"
+    }/login?error=auth_failed`, // Redirect to frontend login on failure
+    session: true, // Ensure session is established
+  }),
   (req, res) => {
-    // Make sure hasHistoryAccess is explicitly set to false for standard auth
-    req.user.hasHistoryAccess = false;
-    res.redirect("/dashboard");
+    // Successful authentication, redirect to the frontend dashboard or home page.
+    // The frontend will then fetch user status.
+    console.log("Auth callback successful, redirecting to frontend.");
+    res.redirect(process.env.FRONTEND_URL || "http://localhost:3001");
   }
 );
 
@@ -257,26 +300,20 @@ const upload = multer({
 
 // API route for user settings
 app.post("/api/settings", isAuthenticated, (req, res) => {
-  try {
-    // In a real app, you would store these settings in a database
-    // For now, we'll just store them in the session
-    if (!req.user.settings) {
-      req.user.settings = {};
-    }
-
-    // Update user settings
-    req.user.settings = {
-      ...req.user.settings,
-      ...req.body,
-    };
-
-    res.json({ success: true, message: "Settings updated successfully" });
-  } catch (error) {
-    console.error("Error updating settings:", error);
-    res
-      .status(500)
-      .json({ success: false, error: "Failed to update settings" });
+  const { discoveryLevel, excludedCategories } = req.body;
+  // Validate input
+  if (discoveryLevel && typeof discoveryLevel === "string") {
+    req.user.settings.discoveryLevel = discoveryLevel;
   }
+  if (Array.isArray(excludedCategories)) {
+    req.user.settings.excludedCategories = excludedCategories;
+  }
+  // In a real app, save these settings persistently (DB)
+  console.log(
+    `Settings updated for ${req.user.profile?.email}:`,
+    req.user.settings
+  );
+  res.json({ success: true, settings: req.user.settings });
 });
 
 // API route to delete user data
@@ -1023,7 +1060,7 @@ async function getIntelligentRecommendations(
         );
 
         // Search for videos with this term
-        const results = await searchYouTubeVideos(randomTerm.term);
+        const results = await searchYouTubeVideos(youtube, randomTerm.term);
 
         if (results && results.length > 0) {
           // Tag the videos with their category
@@ -1053,7 +1090,10 @@ async function getIntelligentRecommendations(
       console.log(
         "Not enough results from category search. Adding generic results."
       );
-      const genericResults = await searchYouTubeVideos("interesting videos");
+      const genericResults = await searchYouTubeVideos(
+        youtube,
+        "interesting videos"
+      );
       if (genericResults && genericResults.length > 0) {
         const taggedGeneric = genericResults.map((video) => ({
           ...video,
@@ -1402,7 +1442,7 @@ function getDiscoveryTerms() {
 }
 
 // Search YouTube videos (helper function)
-async function searchYouTubeVideos(searchTerm, maxResults = 10) {
+async function searchYouTubeVideos(youtube, searchTerm, maxResults = 10) {
   try {
     console.log(`Searching YouTube for: ${searchTerm}`);
 
@@ -1412,13 +1452,13 @@ async function searchYouTubeVideos(searchTerm, maxResults = 10) {
       return [];
     }
 
-    const youtube = google.youtube({
+    const youtubeDataApi = google.youtube({
       version: "v3",
       auth: process.env.YOUTUBE_API_KEY,
     });
 
     // Search for videos with additional error handling
-    const response = await youtube.search
+    const response = await youtubeDataApi.search
       .list({
         part: "snippet",
         q: searchTerm,
